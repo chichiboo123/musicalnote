@@ -803,7 +803,7 @@
             </label>
             <div class="title-row">
               <input id="f-title" class="input" type="text" placeholder="예) 데스노트" />
-              <button id="btn-ai-fill" class="btn btn-ai" type="button" title="Gemini로 작품 정보 자동입력">
+              <button id="btn-ai-fill" class="btn btn-ai" type="button" title="AI로 작품 정보 자동입력">
                 <span class="material-icons-outlined">auto_awesome</span><span class="btn-label">AI 자동입력</span>
               </button>
             </div>
@@ -872,7 +872,7 @@
           <div class="field">
             <label for="f-review">관람 후기
               <span class="label-actions">
-                <button id="btn-ai-polish" class="btn btn-ai btn-sm" type="button" title="Gemini로 글 다듬기">
+                <button id="btn-ai-polish" class="btn btn-ai btn-sm" type="button" title="AI로 글 다듬기">
                   <span class="material-icons-outlined" style="font-size:16px">auto_fix_high</span>AI로 다듬기
                 </button>
               </span>
@@ -978,11 +978,11 @@
             <input id="s-script-url" class="input" type="url" placeholder="https://script.google.com/macros/s/…/exec" />
           </div>
           <div class="field">
-            <label for="s-gemini-key">Gemini API 키</label>
-            <input id="s-gemini-key" class="input" type="password" placeholder="AIza…" />
+            <label for="s-groq-key">Groq API 키</label>
+            <input id="s-groq-key" class="input" type="password" placeholder="gsk_…" />
           </div>
           <p style="font-size:12px;color:var(--color-gray-500);word-break:keep-all">
-            보통은 GitHub 시크릿(GEMINI_API_KEY, APPS_SCRIPT_URL)으로 배포 시 자동 주입되므로 비워 두면 됩니다.
+            보통은 GitHub 시크릿(GROQ_API_KEY, APPS_SCRIPT_URL)으로 배포 시 자동 주입되므로 비워 두면 됩니다.
             여기 입력한 값은 이 브라우저에만 저장되며 배포 값보다 우선 적용됩니다.
           </p>
         </div>
@@ -1017,7 +1017,7 @@
       const injected = window.APP_CONFIG || {};
       return {
         scriptUrl: local.scriptUrl || injected.APPS_SCRIPT_URL || '',
-        geminiKey: local.geminiKey || injected.GEMINI_API_KEY || '',
+        groqKey: local.groqKey || injected.GROQ_API_KEY || '',
       };
     }
 
@@ -1128,68 +1128,57 @@
       }
     }
 
-    /* ---------- Gemini ---------- */
-    const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+    /* ---------- Groq ---------- */
+    // Groq는 OpenAI 호환 API를 제공한다. (Bearer 인증)
+    const GROQ_API_BASE = 'https://api.groq.com/openai/v1';
 
-    // 사용자가 지정한 선호 순서. 실제로 사용 가능한 모델만 이 순서대로 시도한다.
-    const GEMINI_PREFERRED = [
-      { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite' },
-      { id: 'gemini-3.5-flash',      label: 'Gemini 3.5 Flash' },
-      { id: 'gemini-3-flash',        label: 'Gemini 3 Flash' },
-      { id: 'gemini-2.5-flash',      label: 'Gemini 2.5 Flash' },
-      { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
-    ];
-    // 위 목록이 모두 막혀도 항상 현재 최신 모델을 가리키는 안전용 별칭.
-    const GEMINI_ALIASES = [
-      { id: 'gemini-flash-latest',      label: '최신 Flash (자동)' },
-      { id: 'gemini-flash-lite-latest', label: '최신 Flash Lite (자동)' },
+    // 사용자가 지정한 선호 순서. 이 순서대로 시도하고, 셋 다 막히면
+    // 아래 buildGroqCandidates가 "호출 가능한 다른 모델"을 자동으로 이어붙인다.
+    const GROQ_PREFERRED = [
+      { id: 'openai/gpt-oss-120b',     label: 'GPT-OSS 120B' },
+      { id: 'openai/gpt-oss-20b',      label: 'GPT-OSS 20B' },
+      { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B' },
     ];
 
-    let _geminiModelSet = undefined; // 사용 가능한 모델 ID Set (1회 조회 후 캐시, null=조회 실패)
+    let _groqModelSet = undefined; // 사용 가능한 모델 ID Set (1회 조회 후 캐시, null=조회 실패)
 
-    // 이 API 키로 generateContent 가능한 모델 목록을 조회한다.
-    async function getAvailableGeminiModels() {
-      if (_geminiModelSet !== undefined) return _geminiModelSet;
+    // 이 API 키로 사용 가능한 모델 목록을 조회한다. (텍스트 채팅 모델만)
+    async function getAvailableGroqModels() {
+      if (_groqModelSet !== undefined) return _groqModelSet;
       try {
-        const res = await fetch(GEMINI_API_BASE + '?key=' + encodeURIComponent(state.cfg.geminiKey));
-        if (!res.ok) { _geminiModelSet = null; return null; }
+        const res = await fetch(GROQ_API_BASE + '/models', {
+          headers: { Authorization: 'Bearer ' + state.cfg.groqKey },
+        });
+        if (!res.ok) { _groqModelSet = null; return null; }
         const data = await res.json();
         const ids = new Set();
-        (data.models || []).forEach((m) => {
-          const methods = m.supportedGenerationMethods || m.supportedActions || [];
-          if (methods.includes('generateContent')) {
-            ids.add(String(m.name || '').replace(/^models\//, ''));
-          }
-        });
-        _geminiModelSet = ids.size ? ids : null;
+        (data.data || []).forEach((m) => { if (m && m.id) ids.add(String(m.id)); });
+        _groqModelSet = ids.size ? ids : null;
       } catch (e) {
-        _geminiModelSet = null; // 조회 실패 시 선호 목록을 그대로 시도
+        _groqModelSet = null; // 조회 실패 시 선호 목록을 그대로 시도
       }
-      return _geminiModelSet;
+      return _groqModelSet;
     }
 
     // 실제로 시도할 모델 후보를 선호 순서대로 구성한다.
-    async function buildGeminiCandidates() {
-      const available = await getAvailableGeminiModels();
+    async function buildGroqCandidates() {
+      const available = await getAvailableGroqModels();
       let candidates;
       if (available) {
-        candidates = GEMINI_PREFERRED.filter((m) => available.has(m.id));
-        if (!candidates.length) {
-          // 선호 목록이 전부 막혔으면 사용 가능한 flash 계열을 최신순으로 대체.
-          candidates = [...available]
-            .filter((id) => id.includes('flash') && !id.includes('image') && !id.includes('tts'))
-            .sort().reverse()
-            .map((id) => ({ id, label: id }));
-        }
-        // 별칭은 목록에 실제로 존재할 때만 안전망으로 추가.
-        GEMINI_ALIASES.forEach((a) => {
-          if (available.has(a.id) && !candidates.some((c) => c.id === a.id)) candidates.push(a);
-        });
+        // 1) 선호 목록 중 실제로 사용 가능한 것만 그대로 순서대로.
+        candidates = GROQ_PREFERRED.filter((m) => available.has(m.id));
+        // 2) 선호 3종이 모두 막혀도 호출 가능한 다른 텍스트 모델로 자동 폴백.
+        const preferredIds = new Set(GROQ_PREFERRED.map((m) => m.id));
+        [...available]
+          .filter((id) => !preferredIds.has(id)
+            && !/whisper|tts|guard|vision|embed|moderation/i.test(id))
+          .sort()
+          .forEach((id) => candidates.push({ id, label: id }));
       } else {
-        // 목록 조회에 실패하면 선호 목록 + 별칭을 그대로 순서대로 시도.
-        candidates = GEMINI_PREFERRED.concat(GEMINI_ALIASES);
+        // 목록 조회에 실패하면 선호 목록을 그대로 순서대로 시도.
+        candidates = GROQ_PREFERRED.slice();
       }
-      return candidates.slice(0, 6); // 할당량 초과 시 과도한 재시도 방지
+      return candidates.slice(0, 6); // 한도 초과 시 과도한 재시도 방지
     }
 
     // 현재 사용 중인 AI 모델을 배터리 아이콘으로 표시한다.
@@ -1217,16 +1206,17 @@
         + ' (' + (index + 1) + '/' + total + ')';
     }
 
-    async function callGemini(prompt, useSearch) {
-      if (!state.cfg.geminiKey) {
-        throw new Error('Gemini API 키가 설정되지 않았습니다. 배포 시크릿 또는 설정에서 키를 등록하세요.');
+    class GroqAuthError extends Error {}
+
+    async function callGroq(prompt, opts) {
+      opts = opts || {};
+      if (!state.cfg.groqKey) {
+        throw new Error('Groq API 키가 설정되지 않았습니다. 배포 시크릿 또는 설정에서 키를 등록하세요.');
       }
-      const body = { contents: [{ parts: [{ text: prompt }] }] };
-      if (useSearch) body.tools = [{ google_search: {} }];
-      const candidates = await buildGeminiCandidates();
+      const candidates = await buildGroqCandidates();
       if (!candidates.length) {
         setAiBattery('', -1, 0, 'failed');
-        throw new Error('이 API 키로 사용 가능한 Gemini 모델이 없습니다. API 키 또는 사용 권한을 확인하세요.');
+        throw new Error('이 API 키로 사용 가능한 Groq 모델이 없습니다. API 키 또는 사용 권한을 확인하세요.');
       }
       const total = candidates.length;
       let lastErr = null;
@@ -1234,38 +1224,51 @@
       for (let i = 0; i < total; i++) {
         const model = candidates[i];
         setAiBattery(model.label, i, total, 'trying');
+        // 필요한 만큼만 생성해 토큰(=API 사용량)을 아낀다.
+        const body = {
+          model: model.id,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: opts.temperature ?? 0.4,
+          max_tokens: opts.maxTokens || 1200,
+        };
+        // gpt-oss 계열은 추론 강도를 낮춰 불필요한 추론 토큰 소모를 줄인다.
+        if (/gpt-oss/.test(model.id)) body.reasoning_effort = 'low';
         try {
-          const endpoint = GEMINI_API_BASE + '/' + model.id + ':generateContent';
-          const res = await fetch(endpoint + '?key=' + encodeURIComponent(state.cfg.geminiKey), {
+          const res = await fetch(GROQ_API_BASE + '/chat/completions', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + state.cfg.groqKey,
+            },
             body: JSON.stringify(body),
           });
           if (!res.ok) {
             let detail = '';
             try { detail = (await res.json()).error?.message || ''; } catch (e) {}
-            if (res.status === 429) quotaHit = true; // 할당량/속도 제한
-            lastErr = new Error('Gemini API 오류 (' + res.status + ') ' + detail);
+            // 인증 오류는 어떤 모델로 바꿔도 실패하므로 즉시 중단(불필요한 호출 방지).
+            if (res.status === 401 || res.status === 403) {
+              throw new GroqAuthError('Groq API 키 인증에 실패했습니다 (' + res.status + '). 키를 확인하세요. ' + detail);
+            }
+            if (res.status === 429) quotaHit = true; // 속도/한도 제한
+            lastErr = new Error('Groq API 오류 (' + res.status + ') ' + detail);
             continue; // 다음 모델로 폴백
           }
           const data = await res.json();
-          const text = (data.candidates?.[0]?.content?.parts || [])
-            .map((p) => p.text || '')
-            .join('');
-          if (!text) { lastErr = new Error('Gemini 응답이 비어 있습니다.'); continue; }
+          const text = data.choices?.[0]?.message?.content || '';
+          if (!text.trim()) { lastErr = new Error('Groq 응답이 비어 있습니다.'); continue; }
           setAiBattery(model.label, i, total, 'active'); // 성공한 모델을 확정 표시
           return text;
         } catch (err) {
+          if (err instanceof GroqAuthError) { setAiBattery('', -1, total, 'failed'); throw err; }
           lastErr = err; // 네트워크 오류 등 → 다음 모델로 폴백
         }
       }
       setAiBattery('', -1, total, 'failed');
       if (quotaHit) {
-        throw new Error('AI 사용 할당량(quota)을 초과했습니다. 잠시 후(약 1분) 다시 시도하거나, '
-          + 'Google AI Studio에서 결제(billing)를 설정하거나 다른 API 키를 사용하세요. '
-          + '무료 등급은 하루 사용량이 제한되며 태평양시 자정에 초기화됩니다.');
+        throw new Error('Groq 사용 한도(rate limit)를 초과했습니다. 잠시 후 다시 시도하거나 '
+          + 'Groq Console(console.groq.com)에서 사용량·결제 설정을 확인하세요.');
       }
-      throw lastErr || new Error('모든 Gemini 모델 호출에 실패했습니다.');
+      throw lastErr || new Error('모든 Groq 모델 호출에 실패했습니다.');
     }
 
     function extractJson(text) {
@@ -1283,8 +1286,8 @@
       setBusy(btn, true);
       try {
         const prompt = [
-          `한국에서 공연된(또는 공연 중인) 뮤지컬 "${title}"의 정보를 검색해서 아래 JSON 형식으로만 답해줘.`,
-          '설명 없이 JSON만 출력해. 확실하지 않은 항목은 빈 문자열로 남겨.',
+          `한국에서 공연된(또는 공연 중인) 뮤지컬 "${title}"의 정보를 아는 대로 아래 JSON 형식으로만 답해줘.`,
+          '설명 없이 JSON만 출력해. 지어내지 말고, 확실하지 않은 항목은 빈 문자열로 남겨.',
           '{',
           '  "title": "정식 작품명",',
           '  "venue": "가장 최근 시즌의 공연장 이름",',
@@ -1294,7 +1297,7 @@
           '  "posterUrl": "공식 포스터 이미지의 직접 URL (jpg/png 등 이미지 파일 주소가 확실할 때만, 아니면 빈 문자열)"',
           '}',
         ].join('\n');
-        const text = await callGemini(prompt, true);
+        const text = await callGroq(prompt, { temperature: 0.3, maxTokens: 1200 });
         const info = extractJson(text);
         const fill = (id, v) => { if (v && !$(id).value.trim()) $(id).value = v; };
         if (info.title) $('f-title').value = info.title;
@@ -1331,7 +1334,7 @@
           '--- 초고 ---',
           original,
         ].join('\n');
-        const polished = (await callGemini(prompt, false)).trim();
+        const polished = (await callGroq(prompt, { temperature: 0.6, maxTokens: 2048 })).trim();
         state.polishResult = polished;
         $('polish-original').textContent = original;
         $('polish-result').textContent = polished;
@@ -1754,16 +1757,16 @@
       let local = {};
       try { local = JSON.parse(localStorage.getItem(LOCAL_CFG_KEY) || '{}'); } catch (e) {}
       $('s-script-url').value = local.scriptUrl || '';
-      $('s-gemini-key').value = local.geminiKey || '';
+      $('s-groq-key').value = local.groqKey || '';
       openModal('settings-modal');
     });
     $('btn-save-settings').addEventListener('click', () => {
       const local = {
         scriptUrl: $('s-script-url').value.trim(),
-        geminiKey: $('s-gemini-key').value.trim(),
+        groqKey: $('s-groq-key').value.trim(),
       };
       if (!local.scriptUrl) delete local.scriptUrl;
-      if (!local.geminiKey) delete local.geminiKey;
+      if (!local.groqKey) delete local.groqKey;
       localStorage.setItem(LOCAL_CFG_KEY, JSON.stringify(local));
       state.cfg = loadConfig();
       closeModal('settings-modal');

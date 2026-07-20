@@ -2,5 +2,5 @@
 // 로컬에서 직접 테스트할 때만 아래 값을 채우세요. (커밋하지 않도록 주의)
 window.APP_CONFIG = {
   APPS_SCRIPT_URL: '',
-  GEMINI_API_KEY: '',
+  GROQ_API_KEY: '',
 };
