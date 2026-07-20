@@ -53,6 +53,9 @@ function handleRequest(req) {
       case 'uploadPoster':
         requireAdmin(isAdmin);
         return { ok: true, url: uploadPoster(req.data, req.mimeType) };
+      case 'kopis':
+        requireAdmin(isAdmin);
+        return { ok: true, info: kopisLookup(req.title) };
       default:
         return { ok: false, error: '알 수 없는 요청입니다: ' + req.action };
     }
@@ -193,6 +196,106 @@ function getPosterFolder() {
   var folders = DriveApp.getFoldersByName(POSTER_FOLDER_NAME);
   if (folders.hasNext()) return folders.next();
   return DriveApp.createFolder(POSTER_FOLDER_NAME);
+}
+
+/**
+ * 공연예술통합전산망(KOPIS) Open API로 공연 정보를 조회한다.
+ * 서비스키는 스크립트 속성 KOPIS_API_KEY 에 저장한다. (클라이언트에 노출되지 않음)
+ * 1) 공연명으로 목록을 검색해 가장 잘 맞는 공연을 고르고
+ * 2) 그 공연ID로 상세 정보를 받아 앱 입력 폼에 맞는 형태로 돌려준다.
+ */
+var KOPIS_BASE = 'http://www.kopis.or.kr/openApi/restful/pblprfr';
+
+function kopisLookup(title) {
+  title = (title || '').toString().trim();
+  if (!title) throw new Error('작품명이 없습니다.');
+  var key = PropertiesService.getScriptProperties().getProperty('KOPIS_API_KEY');
+  if (!key) throw new Error('KOPIS_API_KEY 스크립트 속성이 설정되지 않았습니다. Apps Script 프로젝트 설정에서 추가하세요.');
+
+  // 공연시작일 기준 넓은 기간으로 이름 검색 (장기공연 포함하도록 과거까지 넓게).
+  var eddate = Utilities.formatDate(
+    new Date(Date.now() + 365 * 24 * 3600 * 1000), 'Asia/Seoul', 'yyyyMMdd');
+  var listUrl = KOPIS_BASE
+    + '?service=' + encodeURIComponent(key)
+    + '&stdate=20000101&eddate=' + eddate
+    + '&cpage=1&rows=50'
+    + '&shprfnm=' + encodeURIComponent(title);
+  var items = kopisFetch(listUrl).getRootElement().getChildren('db');
+  if (!items || items.length === 0) {
+    throw new Error('KOPIS에서 "' + title + '" 검색 결과가 없습니다. 작품명을 확인해 주세요.');
+  }
+
+  // 매칭 우선순위: 이름 정확도 > 뮤지컬 장르 > 최신 공연.
+  var q = normalizeName(title);
+  var scored = items.map(function (db) {
+    var name = normalizeName(kopisText(db, 'prfnm'));
+    var exact = name === q ? 2 : (name.indexOf(q) >= 0 || q.indexOf(name) >= 0 ? 1 : 0);
+    var musical = kopisText(db, 'genrenm').indexOf('뮤지컬') >= 0 ? 1 : 0;
+    return { db: db, exact: exact, musical: musical, from: kopisText(db, 'prfpdfrom') };
+  });
+  scored.sort(function (a, b) {
+    if (b.exact !== a.exact) return b.exact - a.exact;
+    if (b.musical !== a.musical) return b.musical - a.musical;
+    return (b.from || '').localeCompare(a.from || '');
+  });
+
+  var mt20id = kopisText(scored[0].db, 'mt20id');
+  if (!mt20id) throw new Error('KOPIS 공연 ID를 찾지 못했습니다.');
+
+  // 상세 조회.
+  var detailUrl = KOPIS_BASE + '/' + encodeURIComponent(mt20id)
+    + '?service=' + encodeURIComponent(key);
+  var d = kopisFetch(detailUrl).getRootElement().getChild('db');
+  if (!d) throw new Error('KOPIS 상세 정보를 불러오지 못했습니다.');
+
+  var cast = kopisText(d, 'prfcast');
+  return {
+    title: kopisText(d, 'prfnm'),
+    venue: kopisText(d, 'fcltynm'),
+    runningTime: kopisText(d, 'prfruntime'),
+    synopsis: kopisText(d, 'sty'),
+    // 출연진은 콤마 구분 → 줄바꿈으로 정리.
+    cast: cast ? cast.split(/\s*,\s*/).filter(String).join('\n') : '',
+    // 포스터는 http로 오므로 https로 바꿔 혼합콘텐츠 차단을 피한다.
+    posterUrl: kopisText(d, 'poster').replace(/^http:\/\//i, 'https://'),
+    genre: kopisText(d, 'genrenm'),
+    state: kopisText(d, 'prfstate'),
+    period: kopisText(d, 'prfpdfrom') + ' ~ ' + kopisText(d, 'prfpdto')
+  };
+}
+
+function kopisFetch(url) {
+  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  var code = res.getResponseCode();
+  var text = res.getContentText('UTF-8');
+  if (code !== 200) {
+    throw new Error('KOPIS API 호출 실패 (' + code + '). 서비스키 또는 승인 상태를 확인하세요.');
+  }
+  var doc;
+  try {
+    doc = XmlService.parse(text);
+  } catch (e) {
+    throw new Error('KOPIS 응답을 해석하지 못했습니다. (서비스키가 잘못되었거나 승인되지 않았을 수 있습니다)');
+  }
+  // 키/파라미터 오류 시 KOPIS는 200에 에러 XML을 주기도 한다.
+  var rootName = doc.getRootElement().getName();
+  if (rootName !== 'dbs') {
+    var errMsg = kopisText(doc.getRootElement(), 'returnReasonCode')
+      || kopisText(doc.getRootElement(), 'errMsg')
+      || text.slice(0, 120);
+    throw new Error('KOPIS 오류 응답: ' + errMsg);
+  }
+  return doc;
+}
+
+function kopisText(el, name) {
+  if (!el) return '';
+  var c = el.getChild(name);
+  return c ? String(c.getText() || '').trim() : '';
+}
+
+function normalizeName(s) {
+  return String(s || '').replace(/\s+/g, '').toLowerCase();
 }
 
 /**
