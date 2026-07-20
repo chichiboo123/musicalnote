@@ -3,4 +3,5 @@
 window.APP_CONFIG = {
   APPS_SCRIPT_URL: '',
   GEMINI_API_KEY: '',
+  GROQ_API_KEY: '',
 };
