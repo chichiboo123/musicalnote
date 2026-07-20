@@ -1201,8 +1201,6 @@
       if (!state.cfg.geminiKey) {
         throw new Error('Gemini API 키가 설정되지 않았습니다. 배포 시크릿 또는 설정에서 키를 등록하세요.');
       }
-      const body = { contents: [{ parts: [{ text: prompt }] }] };
-      if (useSearch) body.tools = [{ google_search: {} }];
       const candidates = await buildGeminiCandidates();
       if (!candidates.length) {
         setAiBattery('', -1, 0, 'failed');
@@ -1210,40 +1208,75 @@
       }
       const total = candidates.length;
       let lastErr = null;
-      let quotaHit = false;
+      let rateLimited = false;   // 429(분당/일일 사용량 제한)
+      let dailyLimited = false;  // 하루 단위 제한이 명시된 경우
+      let groundingBlocked = false; // 실시간 검색(그라운딩) 할당량이 원인일 때
+      let retrySec = 0;          // 오류 메시지가 알려주는 대기 시간(초)
+      let searchTried = false;   // 검색 그라운딩은 첫 모델에서 한 번만 시도
+
+      // 모델 1개를 실제로 호출한다. search=true면 실시간 검색 그라운딩을 붙인다.
+      async function callOnce(model, search) {
+        const body = { contents: [{ parts: [{ text: prompt }] }] };
+        if (search) body.tools = [{ google_search: {} }];
+        const endpoint = GEMINI_API_BASE + '/' + model.id + ':generateContent';
+        return fetch(endpoint + '?key=' + encodeURIComponent(state.cfg.geminiKey), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      }
+
       for (let i = 0; i < total; i++) {
         const model = candidates[i];
         setAiBattery(model.label, i, total, 'trying');
-        try {
-          const endpoint = GEMINI_API_BASE + '/' + model.id + ':generateContent';
-          const res = await fetch(endpoint + '?key=' + encodeURIComponent(state.cfg.geminiKey), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          if (!res.ok) {
-            let detail = '';
-            try { detail = (await res.json()).error?.message || ''; } catch (e) {}
-            if (res.status === 429) quotaHit = true; // 할당량/속도 제한
-            lastErr = new Error('Gemini API 오류 (' + res.status + ') ' + detail);
-            continue; // 다음 모델로 폴백
+        // 첫 모델만 [검색 → 검색 없이] 순으로 시도하고, 이후 모델은 검색 없이만.
+        // (검색 그라운딩은 프로젝트 단위 할당량이 따로 있어, 막히면 계속 붙여봐야 낭비다.)
+        const useSearchNow = useSearch && !searchTried;
+        const attempts = useSearchNow ? [true, false] : [false];
+        for (const search of attempts) {
+          if (search) searchTried = true;
+          try {
+            const res = await callOnce(model, search);
+            if (!res.ok) {
+              let detail = '';
+              try { detail = (await res.json()).error?.message || ''; } catch (e) {}
+              if (res.status === 429) {
+                rateLimited = true;
+                if (/per day|perDay|\bday\b|일일|하루/i.test(detail)) dailyLimited = true;
+                const m = detail.match(/(\d+(?:\.\d+)?)\s*s(?:econds?)?\b/i);
+                if (m) retrySec = Math.max(retrySec, Math.ceil(parseFloat(m[1])));
+                if (/search|grounding|ground/i.test(detail)) groundingBlocked = true;
+              }
+              lastErr = new Error('Gemini API 오류 (' + res.status + ') ' + detail);
+              continue; // 같은 모델 무검색 재시도 또는 다음 모델
+            }
+            const data = await res.json();
+            const text = (data.candidates?.[0]?.content?.parts || [])
+              .map((p) => p.text || '')
+              .join('');
+            if (!text) { lastErr = new Error('Gemini 응답이 비어 있습니다.'); continue; }
+            setAiBattery(model.label, i, total, 'active'); // 성공한 모델을 확정 표시
+            return text;
+          } catch (err) {
+            lastErr = err; // 네트워크 오류 등 → 다음 시도로
           }
-          const data = await res.json();
-          const text = (data.candidates?.[0]?.content?.parts || [])
-            .map((p) => p.text || '')
-            .join('');
-          if (!text) { lastErr = new Error('Gemini 응답이 비어 있습니다.'); continue; }
-          setAiBattery(model.label, i, total, 'active'); // 성공한 모델을 확정 표시
-          return text;
-        } catch (err) {
-          lastErr = err; // 네트워크 오류 등 → 다음 모델로 폴백
         }
       }
       setAiBattery('', -1, total, 'failed');
-      if (quotaHit) {
-        throw new Error('AI 사용 할당량(quota)을 초과했습니다. 잠시 후(약 1분) 다시 시도하거나, '
-          + 'Google AI Studio에서 결제(billing)를 설정하거나 다른 API 키를 사용하세요. '
-          + '무료 등급은 하루 사용량이 제한되며 태평양시 자정에 초기화됩니다.');
+      if (rateLimited) {
+        const wait = retrySec ? '약 ' + retrySec + '초 후 ' : '잠시 후 ';
+        let msg;
+        if (dailyLimited) {
+          msg = 'Gemini 하루 사용량 한도를 초과했습니다. 태평양시 자정에 초기화되며, '
+            + 'Google AI Studio에서 결제(billing)를 설정하면 한도가 늘어납니다.';
+        } else {
+          msg = 'Gemini 사용량 제한(429)에 걸렸습니다. 분당 요청 수 제한일 가능성이 높아 '
+            + wait + '다시 시도하면 대개 풀립니다. 계속되면 Google AI Studio에서 사용량·결제를 확인하세요.';
+        }
+        if (groundingBlocked) {
+          msg += ' ※ 실시간 검색(그라운딩) 할당량이 원인일 수 있어 검색 없이도 시도했지만 실패했습니다.';
+        }
+        throw new Error(msg);
       }
       throw lastErr || new Error('모든 Gemini 모델 호출에 실패했습니다.');
     }
@@ -1444,17 +1477,17 @@
       setBusy(btn, true);
       try {
         const prompt = [
-          '다음은 내가 쓴 뮤지컬 관람 후기 초고야. 아래 원칙을 지켜서 다듬어 줘.',
-          '- 나의 말투와 감상, 표현 의도는 그대로 유지한다.',
-          '- 맞춤법과 띄어쓰기를 바로잡고, 어색한 문장을 자연스럽게 고친다.',
-          '- 내용을 새로 지어내거나 과장하지 않는다.',
-          '- 문단 구분을 정리해 읽기 좋게 만든다.',
+          '다음은 내가 쓴 뮤지컬 관람 후기 초고야. 아래 원칙에 따라 자연스럽고 읽기 좋게 적극적으로 다듬어 줘.',
+          '- 나의 말투·감상·핵심 의도는 유지하되, 문장 흐름과 표현은 적극적으로 손봐 더 매끄럽고 생생하게 만든다.',
+          '- 맞춤법·띄어쓰기를 바로잡고, 어색하거나 반복되는 표현·비문을 자연스러운 문장으로 고쳐 쓴다.',
+          '- 밋밋하거나 모호한 표현은 어감을 살려 더 적확한 단어·문장으로 바꾼다. 단, 없는 내용을 지어내거나 사실을 과장하지 않는다.',
+          '- 필요하면 문장 순서와 문단 구분을 조정해 글의 흐름이 잘 이어지게 한다.',
           '- 다듬은 글만 출력하고, 설명이나 인사말은 붙이지 않는다.',
           '',
           '--- 초고 ---',
           original,
         ].join('\n');
-        const polished = (await callGroq(prompt, { temperature: 0.6, maxTokens: 2048 })).trim();
+        const polished = (await callGroq(prompt, { temperature: 0.7, maxTokens: 2048 })).trim();
         state.polishResult = polished;
         $('polish-original').textContent = original;
         $('polish-result').textContent = polished;
