@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, claude/musical-review-archive-gq2omp]
   workflow_dispatch:
 
 permissions:
