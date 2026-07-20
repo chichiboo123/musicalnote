@@ -1239,13 +1239,21 @@
             const res = await callOnce(model, search);
             if (!res.ok) {
               let detail = '';
-              try { detail = (await res.json()).error?.message || ''; } catch (e) {}
+              let raw = '';
+              try {
+                const j = await res.json();
+                detail = j.error?.message || '';
+                raw = JSON.stringify(j); // details(할당량 종류·retryDelay) 포함 전체
+              } catch (e) {}
               if (res.status === 429) {
                 rateLimited = true;
-                if (/per day|perDay|\bday\b|일일|하루/i.test(detail)) dailyLimited = true;
-                const m = detail.match(/(\d+(?:\.\d+)?)\s*s(?:econds?)?\b/i);
+                // 하루 단위 제한이 명시되면 일일 한도로 판단.
+                if (/per\s*day|perDay|PerDay|GenerateRequestsPerDay|\bday\b|일일|하루/i.test(raw)) dailyLimited = true;
+                // retryDelay(예: "27s")나 메시지 속 대기 시간을 뽑아 안내.
+                const m = raw.match(/retryDelay["\s:]*"?(\d+(?:\.\d+)?)s/i)
+                  || detail.match(/(\d+(?:\.\d+)?)\s*s(?:econds?)?\b/i);
                 if (m) retrySec = Math.max(retrySec, Math.ceil(parseFloat(m[1])));
-                if (/search|grounding|ground/i.test(detail)) groundingBlocked = true;
+                if (/search|grounding|ground/i.test(raw)) groundingBlocked = true;
               }
               lastErr = new Error('Gemini API 오류 (' + res.status + ') ' + detail);
               continue; // 같은 모델 무검색 재시도 또는 다음 모델
