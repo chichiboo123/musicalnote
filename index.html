@@ -156,6 +156,68 @@
     }
     .btn-ai:hover { filter: brightness(1.08); }
     .btn-sm { padding: 6px 12px; font-size: 13px; border-radius: var(--border-radius-sm); }
+
+    /* AI 모델 배터리 표시 */
+    .ai-battery {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px 4px 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-gray-700);
+      cursor: default;
+      user-select: none;
+      transition: opacity 0.2s;
+    }
+    .ai-battery-icon {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      width: 26px;
+      height: 13px;
+      padding: 2px;
+      gap: 1.5px;
+      border: 1.5px solid currentColor;
+      border-radius: 3px;
+      color: var(--color-gray-500);
+    }
+    .ai-battery-icon::after {
+      content: '';
+      position: absolute;
+      right: -3.5px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 2.5px;
+      height: 6px;
+      border-radius: 0 2px 2px 0;
+      background: currentColor;
+    }
+    .ai-battery-icon i {
+      flex: 1;
+      align-self: stretch;
+      border-radius: 1px;
+      background: currentColor;
+      opacity: 0.15;
+      transition: opacity 0.2s;
+    }
+    .ai-battery-icon i.on { opacity: 1; }
+    .ai-battery.level-hi .ai-battery-icon { color: var(--color-success); }
+    .ai-battery.level-mid .ai-battery-icon { color: var(--color-warning); }
+    .ai-battery.level-low .ai-battery-icon { color: var(--color-error); }
+    .ai-battery.trying { animation: ai-battery-pulse 1s ease-in-out infinite; }
+    .ai-battery.failed .ai-battery-icon { color: var(--color-error); }
+    .ai-battery-label {
+      max-width: 130px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    @keyframes ai-battery-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+    @media (max-width: 560px) { .ai-battery-label { display: none; } }
     .btn-icon {
       padding: 8px;
       border-radius: 50%;
@@ -652,6 +714,10 @@
           <p class="site-subtitle">막이 내린 뒤에도 남는 순간들 — 뮤지컬 관람 기록 아카이브</p>
         </div>
         <div class="header-actions">
+          <div id="ai-battery" class="ai-battery hidden" role="status" aria-live="polite" title="현재 사용 중인 AI 모델">
+            <span class="ai-battery-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <span class="ai-battery-label"></span>
+          </div>
           <button id="btn-write" class="btn btn-primary hidden" type="button">
             <span class="material-icons-outlined">edit_note</span>기록하기
           </button>
@@ -1063,7 +1129,41 @@
     }
 
     /* ---------- Gemini ---------- */
-    const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+    // 앞에서부터 순서대로 호출하고, 실패하면 다음 모델로 폴백한다.
+    const GEMINI_ENDPOINT_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
+    const GEMINI_MODELS = [
+      { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite' },
+      { id: 'gemini-3.5-flash',      label: 'Gemini 3.5 Flash' },
+      { id: 'gemini-3-flash',        label: 'Gemini 3 Flash' },
+      { id: 'gemini-2.5-flash',      label: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
+    ];
+
+    // 현재 사용 중인 AI 모델을 배터리 아이콘으로 표시한다.
+    function setAiBattery(index, statusClass) {
+      const el = $('ai-battery');
+      if (!el) return;
+      el.classList.remove('hidden', 'trying', 'failed', 'level-hi', 'level-mid', 'level-low');
+      const bars = el.querySelectorAll('.ai-battery-icon i');
+      const label = el.querySelector('.ai-battery-label');
+      if (statusClass === 'failed' || index < 0) {
+        el.classList.add('failed');
+        bars.forEach((b) => b.classList.remove('on'));
+        label.textContent = 'AI 연결 실패';
+        el.title = '모든 AI 모델 호출에 실패했습니다.';
+        return;
+      }
+      const total = GEMINI_MODELS.length;
+      const level = total - index;           // 앞 순위일수록 배터리가 가득 찬다.
+      bars.forEach((b, i) => b.classList.toggle('on', i < level));
+      const tier = level >= 4 ? 'level-hi' : level >= 3 ? 'level-mid' : 'level-low';
+      el.classList.add(tier);
+      if (statusClass === 'trying') el.classList.add('trying');
+      const model = GEMINI_MODELS[index];
+      label.textContent = model.label;
+      el.title = (statusClass === 'trying' ? '호출 중: ' : '사용 중: ') + model.label
+        + ' (' + (index + 1) + '/' + total + ')';
+    }
 
     async function callGemini(prompt, useSearch) {
       if (!state.cfg.geminiKey) {
@@ -1071,22 +1171,36 @@
       }
       const body = { contents: [{ parts: [{ text: prompt }] }] };
       if (useSearch) body.tools = [{ google_search: {} }];
-      const res = await fetch(GEMINI_ENDPOINT + '?key=' + encodeURIComponent(state.cfg.geminiKey), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        let detail = '';
-        try { detail = (await res.json()).error?.message || ''; } catch (e) {}
-        throw new Error('Gemini API 오류 (' + res.status + ') ' + detail);
+      let lastErr = null;
+      for (let i = 0; i < GEMINI_MODELS.length; i++) {
+        const model = GEMINI_MODELS[i];
+        setAiBattery(i, 'trying');
+        try {
+          const endpoint = GEMINI_ENDPOINT_BASE + model.id + ':generateContent';
+          const res = await fetch(endpoint + '?key=' + encodeURIComponent(state.cfg.geminiKey), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) {
+            let detail = '';
+            try { detail = (await res.json()).error?.message || ''; } catch (e) {}
+            lastErr = new Error('Gemini API 오류 (' + res.status + ') ' + detail);
+            continue; // 다음 모델로 폴백
+          }
+          const data = await res.json();
+          const text = (data.candidates?.[0]?.content?.parts || [])
+            .map((p) => p.text || '')
+            .join('');
+          if (!text) { lastErr = new Error('Gemini 응답이 비어 있습니다.'); continue; }
+          setAiBattery(i, 'active'); // 성공한 모델을 확정 표시
+          return text;
+        } catch (err) {
+          lastErr = err; // 네트워크 오류 등 → 다음 모델로 폴백
+        }
       }
-      const data = await res.json();
-      const text = (data.candidates?.[0]?.content?.parts || [])
-        .map((p) => p.text || '')
-        .join('');
-      if (!text) throw new Error('Gemini 응답이 비어 있습니다.');
-      return text;
+      setAiBattery(-1, 'failed');
+      throw lastErr || new Error('모든 Gemini 모델 호출에 실패했습니다.');
     }
 
     function extractJson(text) {
