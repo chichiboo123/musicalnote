@@ -1189,7 +1189,7 @@
         // 목록 조회에 실패하면 선호 목록 + 별칭을 그대로 순서대로 시도.
         candidates = GEMINI_PREFERRED.concat(GEMINI_ALIASES);
       }
-      return candidates;
+      return candidates.slice(0, 6); // 할당량 초과 시 과도한 재시도 방지
     }
 
     // 현재 사용 중인 AI 모델을 배터리 아이콘으로 표시한다.
@@ -1230,6 +1230,7 @@
       }
       const total = candidates.length;
       let lastErr = null;
+      let quotaHit = false;
       for (let i = 0; i < total; i++) {
         const model = candidates[i];
         setAiBattery(model.label, i, total, 'trying');
@@ -1243,6 +1244,7 @@
           if (!res.ok) {
             let detail = '';
             try { detail = (await res.json()).error?.message || ''; } catch (e) {}
+            if (res.status === 429) quotaHit = true; // 할당량/속도 제한
             lastErr = new Error('Gemini API 오류 (' + res.status + ') ' + detail);
             continue; // 다음 모델로 폴백
           }
@@ -1258,6 +1260,11 @@
         }
       }
       setAiBattery('', -1, total, 'failed');
+      if (quotaHit) {
+        throw new Error('AI 사용 할당량(quota)을 초과했습니다. 잠시 후(약 1분) 다시 시도하거나, '
+          + 'Google AI Studio에서 결제(billing)를 설정하거나 다른 API 키를 사용하세요. '
+          + '무료 등급은 하루 사용량이 제한되며 태평양시 자정에 초기화됩니다.');
+      }
       throw lastErr || new Error('모든 Gemini 모델 호출에 실패했습니다.');
     }
 
